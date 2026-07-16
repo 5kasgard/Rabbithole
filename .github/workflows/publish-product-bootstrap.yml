@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "def48cc10d94d6cd77db34f9dc41191d0403e40acf86d3960f49b0854e96c9be"
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
@@ -54,6 +54,7 @@ jobs:
           python -m pip install -e . pytest
           python master_cli.py --root . verify
           python -m compileall -q rabbithole
+          python tests/run_tests.py
           python scripts/run_product_tests.py
 
       - name: Publish one clean product commit
@@ -65,6 +66,9 @@ jobs:
           git checkout --orphan product-publication
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/field-product/. .
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type d -name .pytest_cache -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name 'librhfast.so' \) -delete
           git add -A
-          git commit -m "Publish The Field 0.18.0rc3 product repository"
+          git commit -m "Publish The Field 0.18.0rc3.post1 product repository"
           git push --force origin HEAD:agent/field-product-0.18.0rc3
