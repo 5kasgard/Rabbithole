@@ -10,19 +10,27 @@ on:
 permissions:
   contents: write
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONHASHSEED: "0"
+  TZ: UTC
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
 
-      - name: Verify and safely extract product
+      - name: Verify and safely extract exact product tree
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "def48cc10d94d6cd77db34f9dc41191d0403e40acf86d3960f49b0854e96c9be"
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "bf09e3c6f115033a7c749fe1f2dc978e4d1da63f870bf39a583f9f16d95dcf7f"
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
@@ -32,6 +40,8 @@ jobs:
           target.mkdir(parents=True, exist_ok=True)
           root = target.resolve()
           with ZipFile(archive) as zf:
+              if len(zf.infolist()) != 271:
+                  raise SystemExit(f'unexpected member count: {len(zf.infolist())}')
               for info in zf.infolist():
                   name = info.filename.replace('\\', '/')
                   if name.startswith('/') or '..' in Path(name).parts:
@@ -42,22 +52,38 @@ jobs:
                   destination = (target / name).resolve()
                   if root not in destination.parents and destination != root:
                       raise SystemExit(f'ZIP member escaped target: {name}')
+              if zf.testzip() is not None:
+                  raise SystemExit('ZIP integrity failure')
               zf.extractall(target)
           PY
 
-      - name: Validate exact product source
+      - name: Validate unpacked product source
         working-directory: /tmp/field-product
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
-          python master_cli.py --root . verify
+          python -m pip install -e '.[dev]'
+          python scripts/check_repository.py --check
+          field-master verify
           python -m compileall -q rabbithole
-          python tests/run_tests.py
-          python scripts/run_product_tests.py
+          ruff check rabbithole scripts tests
+          bandit -q -r rabbithole -x tests,history,experimental -ll
+          mypy --follow-imports=skip --ignore-missing-imports \
+            rabbithole/core.py rabbithole/field.py rabbithole/persistence.py \
+            rabbithole/network.py rabbithole/subprocess_control.py rabbithole/wal.py \
+            rabbithole/fast.py rabbithole/acquisition.py rabbithole/faculties.py \
+            rabbithole/search.py rabbithole/tether.py rabbithole/outward_loop.py \
+            rabbithole/perpetual_runtime.py rabbithole/performance_store.py \
+            rabbithole/builtin_verifiers.py rabbithole/verifier_worker.py \
+            rabbithole/capabilities.py rabbithole/actions.py
+          scripts/audit_native.sh
+          python scripts/run_product_tests.py --timeout 240 --json /tmp/product-tests.json
+          python scripts/run_kernel_tests.py --timeout 180 --json /tmp/kernel-tests.json
+          python scripts/build_release.py --outdir /tmp/dist --verify-reproducible
+          python scripts/package_smoke.py --dist /tmp/dist
 
-      - name: Publish one clean product commit
+      - name: Publish one clean unpacked product commit
         shell: bash
         run: |
           set -euo pipefail
@@ -66,9 +92,9 @@ jobs:
           git checkout --orphan product-publication
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/field-product/. .
-          find . -type d -name __pycache__ -prune -exec rm -rf {} +
-          find . -type d -name .pytest_cache -prune -exec rm -rf {} +
-          find . -type f \( -name '*.pyc' -o -name 'librhfast.so' \) -delete
+          find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .hypothesis -o -name dist -o -name build \) -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
+          python scripts/check_repository.py --check
           git add -A
-          git commit -m "Publish The Field 0.18.0rc3.post1 product repository"
+          git commit -m "Publish The Field 0.18.0rc3.post2 product repository"
           git push --force origin HEAD:agent/field-product-0.18.0rc3
