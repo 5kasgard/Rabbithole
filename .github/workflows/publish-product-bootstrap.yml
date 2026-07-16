@@ -5,7 +5,7 @@ on:
     branches:
       - agent/field-product-0.18.0rc3
     paths:
-      - .bootstrap/READY
+      - product-upload.zip
 
 permissions:
   contents: write
@@ -17,15 +17,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Reconstruct readable product patch
+
+      - name: Verify and safely extract product
         shell: bash
         run: |
           set -euo pipefail
-          cat .bootstrap/product.patch.part.* > /tmp/product.patch
-          test "$(sha256sum /tmp/product.patch | cut -d' ' -f1)" = "106288837539f655336cae6d41bd4612a22e1c43fd935314e4dfec3958107940"
-          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          git apply --index /tmp/product.patch
-      - name: Validate product source
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path('product-upload.zip')
+          target = Path('/tmp/field-product')
+          target.mkdir(parents=True, exist_ok=True)
+          root = target.resolve()
+          with ZipFile(archive) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace('\\', '/')
+                  if name.startswith('/') or '..' in Path(name).parts:
+                      raise SystemExit(f'unsafe ZIP member: {name}')
+                  mode = info.external_attr >> 16
+                  if mode & 0o170000 == 0o120000:
+                      raise SystemExit(f'symlink ZIP member refused: {name}')
+                  destination = (target / name).resolve()
+                  if root not in destination.parents and destination != root:
+                      raise SystemExit(f'ZIP member escaped target: {name}')
+              zf.extractall(target)
+          PY
+
+      - name: Validate exact product source
+        working-directory: /tmp/field-product
         shell: bash
         run: |
           set -euo pipefail
@@ -34,11 +55,16 @@ jobs:
           python master_cli.py --root . verify
           python -m compileall -q rabbithole
           python scripts/run_product_tests.py
-      - name: Publish clean product commit
+
+      - name: Publish one clean product commit
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan product-publication
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/field-product/. .
+          git add -A
           git commit -m "Publish The Field 0.18.0rc3 product repository"
-          git push origin HEAD:agent/field-product-0.18.0rc3
+          git push --force origin HEAD:agent/field-product-0.18.0rc3
