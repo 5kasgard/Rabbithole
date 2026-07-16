@@ -17,20 +17,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Reconstruct product source
+      - name: Reconstruct readable product patch
         shell: bash
         run: |
           set -euo pipefail
-          cat .bootstrap/product.part.* > /tmp/product.tar.xz.b64
-          base64 --decode /tmp/product.tar.xz.b64 > /tmp/product.tar.xz
+          cat .bootstrap/product.patch.part.* > /tmp/product.patch
+          test "$(sha256sum /tmp/product.patch | cut -d' ' -f1)" = "106288837539f655336cae6d41bd4612a22e1c43fd935314e4dfec3958107940"
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          tar -xJf /tmp/product.tar.xz -C .
+          git apply --index /tmp/product.patch
+      - name: Validate product source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+          python master_cli.py --root . verify
+          python -m compileall -q rabbithole
+          python scripts/run_product_tests.py
       - name: Publish clean product commit
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
           git commit -m "Publish The Field 0.18.0rc3 product repository"
           git push origin HEAD:agent/field-product-0.18.0rc3
