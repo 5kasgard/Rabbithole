@@ -1,0 +1,140 @@
+name: diagnose-post3-transport
+
+on:
+  push:
+    branches:
+      - agent/field-product-0.18.0rc3
+    paths:
+      - .bootstrap/DIAGNOSE_V3
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Diagnose exact transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import urllib.request
+          from zipfile import ZipFile
+
+          root = Path.cwd()
+          report: dict[str, object] = {
+              "expected_zip_sha256": "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6",
+              "expected_b64_sha256": "ffb04a5d133be26ca59e0c5c8322833ed614cde77b7af34493ada6a4fd4fad99",
+              "expected_xz_sha256": "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9",
+          }
+
+          def digest(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          try:
+              archive = root / "product-upload.zip"
+              archive_bytes = archive.read_bytes()
+              report["zip_sha256"] = digest(archive_bytes)
+              report["zip_bytes"] = len(archive_bytes)
+
+              paths = [root / ".bootstrap" / f"post3.patch.xz.b64.{index:03d}" for index in range(15)]
+              report["missing_chunks"] = [str(path.relative_to(root)) for path in paths if not path.is_file()]
+              report["chunk_bytes"] = [path.stat().st_size if path.is_file() else None for path in paths]
+              combined = b"".join(path.read_bytes() for path in paths)
+              report["combined_b64_sha256"] = digest(combined)
+              report["combined_b64_bytes"] = len(combined)
+
+              decoded = base64.b64decode(combined, validate=True)
+              report["decoded_xz_sha256"] = digest(decoded)
+              report["decoded_xz_bytes"] = len(decoded)
+              patch = lzma.decompress(decoded)
+              report["patch_sha256"] = digest(patch)
+              report["patch_bytes"] = len(patch)
+
+              target = Path("/tmp/field-product-diagnostic")
+              shutil.rmtree(target, ignore_errors=True)
+              target.mkdir(parents=True)
+              resolved = target.resolve()
+              with ZipFile(archive) as zf:
+                  report["zip_members"] = len(zf.infolist())
+                  report["zip_test"] = zf.testzip()
+                  for info in zf.infolist():
+                      name = info.filename.replace("\\", "/")
+                      destination = (target / name).resolve()
+                      if name.startswith("/") or ".." in Path(name).parts:
+                          raise ValueError(f"unsafe ZIP member: {name}")
+                      if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                          raise ValueError(f"symlink refused: {name}")
+                      if destination != resolved and resolved not in destination.parents:
+                          raise ValueError(f"ZIP escape refused: {name}")
+                  zf.extractall(target)
+              report["extraction"] = "ok"
+
+              subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+              subprocess.run(["git", "config", "user.name", "bootstrap"], cwd=target, check=True)
+              subprocess.run(["git", "config", "user.email", "bootstrap@invalid"], cwd=target, check=True)
+              subprocess.run(["git", "add", "-A"], cwd=target, check=True)
+              subprocess.run(["git", "commit", "-qm", "base"], cwd=target, check=True)
+              applied = subprocess.run(
+                  ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
+                  cwd=target,
+                  input=patch,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              report["git_apply_returncode"] = applied.returncode
+              report["git_apply_stdout"] = applied.stdout.decode("utf-8", "replace")[-4000:]
+              report["git_apply_stderr"] = applied.stderr.decode("utf-8", "replace")[-4000:]
+              if applied.returncode == 0:
+                  report["post3_version"] = json.loads((target / "PRODUCT_VALIDATION.json").read_text()).get("runtime_version")
+                  checked = subprocess.run(
+                      ["python", "scripts/check_repository.py", "--check"],
+                      cwd=target,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                  )
+                  report["repository_check_returncode"] = checked.returncode
+                  report["repository_check_stdout"] = checked.stdout.decode("utf-8", "replace")[-4000:]
+                  report["repository_check_stderr"] = checked.stderr.decode("utf-8", "replace")[-4000:]
+          except Exception as exc:
+              report["exception_type"] = type(exc).__name__
+              report["exception"] = str(exc)
+
+          content = json.dumps(report, indent=2, sort_keys=True).encode()
+          payload = json.dumps({
+              "message": "Record post3 transport diagnostic",
+              "content": base64.b64encode(content).decode(),
+              "branch": os.environ["BRANCH"],
+          }).encode()
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/contents/.bootstrap/DIAGNOSTIC_V3.json",
+              data=payload,
+              method="PUT",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit(f"diagnostic write failed: {response.status}")
+          PY
