@@ -1,0 +1,175 @@
+name: diagnose-post3-validation-v6
+
+on:
+  push:
+    branches:
+      - agent/field-product-0.18.0rc3
+    paths:
+      - .bootstrap/DIAGNOSE_VALIDATION_V6
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONHASHSEED: "0"
+  TZ: UTC
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Reconstruct exact post3 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/fix-000a .bootstrap/fix-000b > .bootstrap/post3.patch.xz.b64.000
+          : > .bootstrap/post3.patch.xz.b64.005
+          for i in $(seq 0 5); do
+            cat ".bootstrap/fix-005-$(printf '%02d' "$i")" >> .bootstrap/post3.patch.xz.b64.005
+          done
+          test "$(sha256sum .bootstrap/post3.patch.xz.b64.000 | cut -d' ' -f1)" = "426dd30d733ef4fd2129ed64beb7f703060ecd323f177d63eac14ca903a67176"
+          test "$(sha256sum .bootstrap/post3.patch.xz.b64.005 | cut -d' ' -f1)" = "8f83a682f131bf96518bdbccd5fa3e937570c0a67eb4fcdf35cd113489c3b5b1"
+          : > /tmp/post3.patch.xz.b64
+          for i in $(seq 0 14); do
+            cat ".bootstrap/post3.patch.xz.b64.$(printf '%03d' "$i")" >> /tmp/post3.patch.xz.b64
+          done
+          test "$(sha256sum /tmp/post3.patch.xz.b64 | cut -d' ' -f1)" = "ffb04a5d133be26ca59e0c5c8322833ed614cde77b7af34493ada6a4fd4fad99"
+          base64 --decode /tmp/post3.patch.xz.b64 > /tmp/post3.patch.xz
+          test "$(sha256sum /tmp/post3.patch.xz | cut -d' ' -f1)" = "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9"
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          archive = Path('product-upload.zip')
+          target = Path('/tmp/field-product-v6')
+          target.mkdir(parents=True, exist_ok=True)
+          root = target.resolve()
+          with ZipFile(archive) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace('\\', '/')
+                  destination = (target / name).resolve()
+                  if name.startswith('/') or '..' in Path(name).parts:
+                      raise SystemExit(f'unsafe ZIP member: {name}')
+                  if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit(f'symlink refused: {name}')
+                  if destination != root and root not in destination.parents:
+                      raise SystemExit(f'ZIP escape refused: {name}')
+              if zf.testzip() is not None:
+                  raise SystemExit('ZIP integrity failure')
+              zf.extractall(target)
+          PY
+          cd /tmp/field-product-v6
+          git init -q
+          git config user.name bootstrap
+          git config user.email bootstrap@invalid
+          git add -A
+          git commit -qm base
+          xz -dc /tmp/post3.patch.xz | git apply --index --binary --whitespace=nowarn
+
+      - name: Run validation commands with exact diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import shlex
+          import subprocess
+          import sys
+          import urllib.request
+
+          root = Path('/tmp/field-product-v6')
+          dist = Path('/tmp/dist-v6')
+          commands: list[tuple[str, list[str], int]] = [
+              ('upgrade_pip', [sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'], 600),
+              ('install_full_dev', [sys.executable, '-m', 'pip', 'install', '-e', '.[full,dev]'], 900),
+              ('repository_check', [sys.executable, 'scripts/check_repository.py', '--check'], 120),
+              ('master_verify', ['field-master', 'verify'], 120),
+              ('capabilities', ['field-master', 'capabilities'], 120),
+              ('compileall', [sys.executable, '-m', 'compileall', '-q', 'rabbithole'], 120),
+              ('ruff', ['ruff', 'check', 'rabbithole', 'scripts', 'tests'], 300),
+              ('bandit', ['bandit', '-q', '-r', 'rabbithole', '-x', 'tests,history,experimental', '-ll'], 300),
+              ('mypy', ['mypy', '--follow-imports=skip', '--ignore-missing-imports',
+                  'rabbithole/core.py', 'rabbithole/field.py', 'rabbithole/persistence.py',
+                  'rabbithole/network.py', 'rabbithole/subprocess_control.py', 'rabbithole/wal.py',
+                  'rabbithole/fast.py', 'rabbithole/acquisition.py', 'rabbithole/faculties.py',
+                  'rabbithole/search.py', 'rabbithole/tether.py', 'rabbithole/outward_loop.py',
+                  'rabbithole/perpetual_runtime.py', 'rabbithole/performance_store.py',
+                  'rabbithole/builtin_verifiers.py', 'rabbithole/verifier_worker.py',
+                  'rabbithole/capabilities.py', 'rabbithole/actions.py',
+                  'rabbithole/causal.py', 'rabbithole/features.py'], 600),
+              ('native_audit', ['bash', 'scripts/audit_native.sh'], 900),
+              ('product_tests', [sys.executable, 'scripts/run_product_tests.py', '--timeout', '240', '--json', '/tmp/product-tests-v6.json'], 2400),
+              ('kernel_tests', [sys.executable, 'scripts/run_kernel_tests.py', '--timeout', '180', '--json', '/tmp/kernel-tests-v6.json'], 2400),
+              ('build_release', [sys.executable, 'scripts/build_release.py', '--outdir', str(dist), '--verify-reproducible'], 900),
+              ('package_smoke', [sys.executable, 'scripts/package_smoke.py', '--dist', str(dist), '--full'], 1200),
+          ]
+
+          report: dict[str, object] = {'results': [], 'failed_command': None}
+          for name, command, timeout in commands:
+              try:
+                  completed = subprocess.run(
+                      command,
+                      cwd=root,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      timeout=timeout,
+                      env={**os.environ, 'PYTHONHASHSEED': '0', 'TZ': 'UTC'},
+                  )
+                  result = {
+                      'name': name,
+                      'command': shlex.join(command),
+                      'returncode': completed.returncode,
+                      'stdout_tail': completed.stdout.decode('utf-8', 'replace')[-8000:],
+                      'stderr_tail': completed.stderr.decode('utf-8', 'replace')[-8000:],
+                  }
+              except subprocess.TimeoutExpired as exc:
+                  result = {
+                      'name': name,
+                      'command': shlex.join(command),
+                      'timeout': timeout,
+                      'returncode': None,
+                      'stdout_tail': (exc.stdout or b'').decode('utf-8', 'replace')[-8000:],
+                      'stderr_tail': (exc.stderr or b'').decode('utf-8', 'replace')[-8000:],
+                  }
+              report['results'].append(result)
+              if result.get('returncode') != 0:
+                  report['failed_command'] = name
+                  break
+
+          content = json.dumps(report, indent=2, sort_keys=True).encode()
+          payload = json.dumps({
+              'message': 'Record post3 validation diagnostic v6',
+              'content': base64.b64encode(content).decode(),
+              'branch': os.environ['BRANCH'],
+          }).encode()
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/contents/.bootstrap/VALIDATION_DIAGNOSTIC_V6.json",
+              data=payload,
+              method='PUT',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit(response.status)
+          PY

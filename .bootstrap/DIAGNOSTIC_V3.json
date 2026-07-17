@@ -1,0 +1,31 @@
+{
+  "chunk_bytes": [
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    12000,
+    9608
+  ],
+  "combined_b64_bytes": 177608,
+  "combined_b64_sha256": "5ad57142e9b05b62f5111e2dfbb93bbfbefe070d2aeefbb7df5ef2f82347776b",
+  "decoded_xz_bytes": 133204,
+  "decoded_xz_sha256": "74b153530282e58cb128d59eb94caa9139f825ceb16de487fa2780bc4f7f0e9c",
+  "exception": "Corrupt input data",
+  "exception_type": "LZMAError",
+  "expected_b64_sha256": "ffb04a5d133be26ca59e0c5c8322833ed614cde77b7af34493ada6a4fd4fad99",
+  "expected_xz_sha256": "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9",
+  "expected_zip_sha256": "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6",
+  "missing_chunks": [],
+  "zip_bytes": 658797,
+  "zip_sha256": "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+}

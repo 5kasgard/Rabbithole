@@ -1,0 +1,111 @@
+name: publish-post3-final
+
+on:
+  push:
+    branches:
+      - agent/field-product-0.18.0rc3
+    paths:
+      - .bootstrap/PUBLISH_FINAL
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Reconstruct exact validated post3 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+
+          test "$(sha256sum .bootstrap/fix-000a | cut -d' ' -f1)" = "a33624d57ddbdb53c9532ee0cacae0c3b70ad96fe6ab0fafa71b80c07ebcab17"
+          test "$(sha256sum .bootstrap/fix-000b | cut -d' ' -f1)" = "954e8e60331832b9da4f73c304adcd1ebd2c135eb1e457ba75154b1591e9c54b"
+          cat .bootstrap/fix-000a .bootstrap/fix-000b > .bootstrap/post3.patch.xz.b64.000
+          test "$(sha256sum .bootstrap/post3.patch.xz.b64.000 | cut -d' ' -f1)" = "426dd30d733ef4fd2129ed64beb7f703060ecd323f177d63eac14ca903a67176"
+
+          expected_005=(
+            5fa65753429ac24c5d87ddc4d6d325ac0993215405bae6128ff6e356bcdfcd0c
+            696078587bbbbda4cafa3a9deef5a70b508175316fc1e9a1907097fd428f0c51
+            7a47488158c4ad9610841d5cbb06357927b32fb8d38bda3030825981eee3096d
+            d555146013ac9337a4223018fdc0e6a025c94859308494ef5ea02419b6ceee92
+            960f9ae3b34dfbe63e93ba771301417224a761cdbeee4af56a5b06c2f90aa882
+            a0329da400679fc35cd038739529f0c9a28d9359a943ac60788f7537dc88b826
+          )
+          : > .bootstrap/post3.patch.xz.b64.005
+          for i in $(seq 0 5); do
+            n="$(printf '%02d' "$i")"
+            f=".bootstrap/fix-005-${n}"
+            test "$(sha256sum "$f" | cut -d' ' -f1)" = "${expected_005[$i]}"
+            cat "$f" >> .bootstrap/post3.patch.xz.b64.005
+          done
+          test "$(sha256sum .bootstrap/post3.patch.xz.b64.005 | cut -d' ' -f1)" = "8f83a682f131bf96518bdbccd5fa3e937570c0a67eb4fcdf35cd113489c3b5b1"
+
+          : > /tmp/post3.patch.xz.b64
+          for i in $(seq 0 14); do
+            cat ".bootstrap/post3.patch.xz.b64.$(printf '%03d' "$i")" >> /tmp/post3.patch.xz.b64
+          done
+          test "$(sha256sum /tmp/post3.patch.xz.b64 | cut -d' ' -f1)" = "ffb04a5d133be26ca59e0c5c8322833ed614cde77b7af34493ada6a4fd4fad99"
+          base64 --decode /tmp/post3.patch.xz.b64 > /tmp/post3.patch.xz
+          test "$(sha256sum /tmp/post3.patch.xz | cut -d' ' -f1)" = "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9"
+          xz -t /tmp/post3.patch.xz
+
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path('product-upload.zip')
+          target = Path('/tmp/field-product-final')
+          target.mkdir(parents=True, exist_ok=True)
+          root = target.resolve()
+          with ZipFile(archive) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace('\\', '/')
+                  destination = (target / name).resolve()
+                  if name.startswith('/') or '..' in Path(name).parts:
+                      raise SystemExit(f'unsafe ZIP member: {name}')
+                  if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit(f'symlink refused: {name}')
+                  if destination != root and root not in destination.parents:
+                      raise SystemExit(f'ZIP escape refused: {name}')
+              if zf.testzip() is not None:
+                  raise SystemExit('ZIP integrity failure')
+              zf.extractall(target)
+          PY
+
+          cd /tmp/field-product-final
+          git init -q
+          git config user.name bootstrap
+          git config user.email bootstrap@invalid
+          git add -A
+          git commit -qm base
+          xz -dc /tmp/post3.patch.xz | git apply --index --binary --whitespace=nowarn
+          python scripts/check_repository.py --check
+          python master_cli.py --root . verify
+          python -m compileall -q rabbithole
+
+      - name: Force-publish clean unpacked product branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/field-product-final/.git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan product-publication
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/field-product-final/. .
+          find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .hypothesis -o -name dist -o -name build -o -name '*.egg-info' \) -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
+          python scripts/check_repository.py --check
+          git add -A
+          git commit -m "Publish The Field 0.18.0rc3.post3 product repository"
+          git push --force origin HEAD:agent/field-product-0.18.0rc3

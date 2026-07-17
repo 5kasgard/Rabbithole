@@ -1,0 +1,125 @@
+name: publish-product-bootstrap
+
+on:
+  push:
+    branches:
+      - agent/field-product-0.18.0rc3
+    paths:
+      - .bootstrap/READY
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONHASHSEED: "0"
+  TZ: UTC
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Reconstruct exact post3 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+          cat .bootstrap/post3.patch.xz.b64.* > /tmp/post3.patch.xz.b64
+          base64 --decode /tmp/post3.patch.xz.b64 > /tmp/post3.patch.xz
+          test "$(sha256sum /tmp/post3.patch.xz | cut -d' ' -f1)" = "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9"
+          xz --decompress --stdout /tmp/post3.patch.xz > /tmp/post3.patch
+          test "$(sha256sum /tmp/post3.patch | cut -d' ' -f1)" = "72eaf29dd62087a578888563763f337e8c36d932bea0319e4d83eedc407dffed"
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path('product-upload.zip')
+          target = Path('/tmp/field-product')
+          target.mkdir(parents=True, exist_ok=True)
+          root = target.resolve()
+          with ZipFile(archive) as zf:
+              if len(zf.infolist()) != 243:
+                  raise SystemExit(f'unexpected baseline member count: {len(zf.infolist())}')
+              for info in zf.infolist():
+                  name = info.filename.replace('\\', '/')
+                  if name.startswith('/') or '..' in Path(name).parts:
+                      raise SystemExit(f'unsafe ZIP member: {name}')
+                  mode = info.external_attr >> 16
+                  if mode & 0o170000 == 0o120000:
+                      raise SystemExit(f'symlink ZIP member refused: {name}')
+                  destination = (target / name).resolve()
+                  if root not in destination.parents and destination != root:
+                      raise SystemExit(f'ZIP member escaped target: {name}')
+              if zf.testzip() is not None:
+                  raise SystemExit('baseline ZIP integrity failure')
+              zf.extractall(target)
+          PY
+          cd /tmp/field-product
+          git init -q
+          git config user.name "publication-bootstrap"
+          git config user.email "publication-bootstrap@users.noreply.github.com"
+          git add -A
+          git commit -qm baseline
+          git apply --index --binary /tmp/post3.patch
+          test "$(find . -type f ! -path './.git/*' | wc -l | tr -d ' ')" = "275"
+
+      - name: Validate unpacked offline-first product
+        working-directory: /tmp/field-product
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[full,dev]'
+          python scripts/check_repository.py --check
+          field-master verify
+          python -m compileall -q rabbithole
+          ruff check rabbithole scripts tests
+          bandit -q -r rabbithole -x tests,history,experimental -ll
+          mypy --follow-imports=skip --ignore-missing-imports \
+            rabbithole/core.py rabbithole/field.py rabbithole/persistence.py \
+            rabbithole/network.py rabbithole/subprocess_control.py rabbithole/wal.py \
+            rabbithole/fast.py rabbithole/acquisition.py rabbithole/faculties.py \
+            rabbithole/search.py rabbithole/tether.py rabbithole/outward_loop.py \
+            rabbithole/perpetual_runtime.py rabbithole/performance_store.py \
+            rabbithole/builtin_verifiers.py rabbithole/verifier_worker.py \
+            rabbithole/capabilities.py rabbithole/actions.py rabbithole/causal.py \
+            rabbithole/features.py
+          scripts/audit_native.sh
+          python scripts/run_product_tests.py --timeout 240 --json /tmp/product-tests.json
+          python scripts/run_kernel_tests.py --timeout 180 --json /tmp/kernel-tests.json
+          python scripts/build_release.py --outdir /tmp/dist --verify-reproducible
+          python scripts/package_smoke.py --dist /tmp/dist
+
+      - name: Prove zero-dependency offline install
+        working-directory: /tmp/field-product
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/offline-venv
+          /tmp/offline-venv/bin/python -m pip install --no-index --no-deps /tmp/dist/*.whl
+          /tmp/offline-venv/bin/field-master capabilities
+          /tmp/offline-venv/bin/python -c "import importlib.metadata as m; assert not (m.requires('the-field-akbc') or [])"
+
+      - name: Publish one clean unpacked product commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan product-publication
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/field-product/. .
+          rm -rf .git
+          find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .hypothesis -o -name dist -o -name build \) -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
+          python scripts/check_repository.py --check
+          git add -A
+          git commit -m "Publish The Field 0.18.0rc3.post3 offline-first product repository"
+          git push --force origin HEAD:agent/field-product-0.18.0rc3

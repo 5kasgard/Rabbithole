@@ -1,0 +1,81 @@
+name: check-post3-chunks
+
+on:
+  push:
+    branches:
+      - agent/field-product-0.18.0rc3
+    paths:
+      - .bootstrap/CHECK_CHUNKS_V4
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Compare all chunk hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import urllib.request
+
+          expected = {
+              "000": "426dd30d733ef4fd2129ed64beb7f703060ecd323f177d63eac14ca903a67176",
+              "001": "da19071b46336f3a18f17bcc0f3d860140929895bd71a6cc653df4961ea2ba2d",
+              "002": "1fa31841f18e77907d818a00d47fa9144158722ca453c2fe48b47b41a67f75d5",
+              "003": "3935128e016334b0fcf9f4e4483b8c16d8628e39bc133f3b2942f87a4b39d128",
+              "004": "5cf52fa05d5e9e7ea9374c8fa8fedff32665eeb88d77a5b1a2f024d3e2a324ab",
+              "005": "8f83a682f131bf96518bdbccd5fa3e937570c0a67eb4fcdf35cd113489c3b5b1",
+              "006": "91ce9fb380dd4f243f1281e015181d5cde6c4f2353f53360fc0808489abb43cc",
+              "007": "2828b54a8094cde95879fad20fbf73143d2c196b4de2095f8c48ef2d24b59544",
+              "008": "bbd04dc3532441f576ca399813420b976ddfcd2fa63f4bbe34da4dfdec73586b",
+              "009": "05d27fedb3fa4dafbd9adcc0dc860f63e306466303b29b2a415d223a637164d9",
+              "010": "7c79485965ddf8c17b6c1446a9e88968cf1af277f76315cbdc992dada77e3329",
+              "011": "ac10ca8029ce978f8a2c551097bff4311bd1ea1c205754a77f52836455048d62",
+              "012": "dea38a130ad2fb0f12bec3b218e0d1c99ebf3f478d04c5ae5413fa45ffc3a954",
+              "013": "ce8c5aedae315ae8c557d5bc5f556870d03b3990d9f917c730c7ddb608586e09",
+              "014": "7553c1e451218b500b28c2794a16e9e934a43c042c348c5f17500f7d0a5dc6ef",
+          }
+          actual = {}
+          mismatches = []
+          for number, wanted in expected.items():
+              path = Path('.bootstrap') / f'post3.patch.xz.b64.{number}'
+              data = path.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              actual[number] = {"sha256": got, "bytes": len(data), "expected": wanted}
+              if got != wanted:
+                  mismatches.append(number)
+
+          report = {"mismatches": mismatches, "chunks": actual}
+          content = json.dumps(report, indent=2, sort_keys=True).encode()
+          payload = json.dumps({
+              "message": "Record post3 chunk comparison",
+              "content": base64.b64encode(content).decode(),
+              "branch": os.environ['BRANCH'],
+          }).encode()
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/contents/.bootstrap/CHUNK_CHECK_V4.json",
+              data=payload,
+              method='PUT',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              if response.status not in (200, 201):
+                  raise SystemExit(response.status)
+          PY
