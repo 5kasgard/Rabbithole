@@ -5,7 +5,7 @@ on:
     branches:
       - agent/field-product-0.18.0rc3
     paths:
-      - .bootstrap/READY
+      - .bootstrap/PUBLISH_V2
 
 permissions:
   contents: write
@@ -18,6 +18,7 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -32,8 +33,9 @@ jobs:
           set -euo pipefail
           test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
           : > /tmp/post3.patch.xz.b64
-          for n in $(seq -w 0 14); do
-            f=".bootstrap/post3.patch.xz.b64.$n"
+          for i in $(seq 0 14); do
+            n="$(printf '%03d' "$i")"
+            f=".bootstrap/post3.patch.xz.b64.${n}"
             test -f "$f"
             cat "$f" >> /tmp/post3.patch.xz.b64
           done
@@ -70,6 +72,22 @@ jobs:
           git commit -qm base
           xz -dc /tmp/post3.patch.xz | git apply --index --binary --whitespace=nowarn
 
+      - name: Mark reconstruction complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          content="$(printf 'reconstructed\n' | base64 -w0)"
+          curl --fail-with-body --silent --show-error -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/contents/.bootstrap/STAGE_RECONSTRUCTED_V2" \
+            -d "{\"message\":\"Mark post3 reconstruction complete\",\"content\":\"${content}\",\"branch\":\"${BRANCH}\"}"
+
       - name: Validate exact unpacked product
         working-directory: /tmp/field-product
         shell: bash
@@ -98,6 +116,22 @@ jobs:
           python scripts/build_release.py --outdir /tmp/dist --verify-reproducible
           python scripts/package_smoke.py --dist /tmp/dist --full
 
+      - name: Mark validation complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          content="$(printf 'validated\n' | base64 -w0)"
+          curl --fail-with-body --silent --show-error -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/contents/.bootstrap/STAGE_VALIDATED_V2" \
+            -d "{\"message\":\"Mark post3 validation complete\",\"content\":\"${content}\",\"branch\":\"${BRANCH}\"}"
+
       - name: Prove zero-dependency offline core
         shell: bash
         run: |
@@ -116,19 +150,51 @@ jobs:
           assert report['installation']['network_required_for_core'] is False
           PY
 
+      - name: Mark offline proof complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          content="$(printf 'offline-proof-passed\n' | base64 -w0)"
+          curl --fail-with-body --silent --show-error -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/contents/.bootstrap/STAGE_OFFLINE_V2" \
+            -d "{\"message\":\"Mark post3 offline proof complete\",\"content\":\"${content}\",\"branch\":\"${BRANCH}\"}"
+
       - name: Publish one clean unpacked product commit
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf /tmp/field-product/.git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --orphan product-publication
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/field-product/. .
-          rm -rf .git
           find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .hypothesis -o -name dist -o -name build \) -prune -exec rm -rf {} +
           find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
           python scripts/check_repository.py --check
           git add -A
           git commit -m "Publish The Field 0.18.0rc3.post3 product repository"
           git push --force origin HEAD:agent/field-product-0.18.0rc3
+
+      - name: Record publication failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          content="$(printf 'publication-failed\n' | base64 -w0)"
+          curl --silent --show-error -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/contents/.bootstrap/PUBLISH_FAILED_V2" \
+            -d "{\"message\":\"Record post3 publication failure\",\"content\":\"${content}\",\"branch\":\"${BRANCH}\"}" || true
