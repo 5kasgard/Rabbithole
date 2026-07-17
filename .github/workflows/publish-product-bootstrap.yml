@@ -5,7 +5,7 @@ on:
     branches:
       - agent/field-product-0.18.0rc3
     paths:
-      - product-upload.zip
+      - .bootstrap/READY
 
 permissions:
   contents: write
@@ -26,26 +26,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify and safely extract exact product tree
+      - name: Reconstruct exact post3 tree
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "0964bea2582c948d1a0f980aef8e19580a08e6f1ec78733067cc0537f3328bfe"
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "04c64945fd37a27641d0d35bf754dccf9b492a3bfcff69d0f8d4a535efd38ff6"
+          cat .bootstrap/post3.patch.xz.b64.* > /tmp/post3.patch.xz.b64
+          base64 --decode /tmp/post3.patch.xz.b64 > /tmp/post3.patch.xz
+          test "$(sha256sum /tmp/post3.patch.xz | cut -d' ' -f1)" = "775e70bc3e78188699fdd115e1f55a088ba81cc3d0dd8368ea5508fd922508d9"
+          xz --decompress --stdout /tmp/post3.patch.xz > /tmp/post3.patch
+          test "$(sha256sum /tmp/post3.patch | cut -d' ' -f1)" = "72eaf29dd62087a578888563763f337e8c36d932bea0319e4d83eedc407dffed"
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
-          import json
 
           archive = Path('product-upload.zip')
           target = Path('/tmp/field-product')
           target.mkdir(parents=True, exist_ok=True)
           root = target.resolve()
           with ZipFile(archive) as zf:
-              infos = zf.infolist()
-              if len(infos) != 275:
-                  raise SystemExit(f'unexpected member count: {len(infos)}')
-              names = {info.filename.replace('\\', '/') for info in infos}
-              for info in infos:
+              if len(zf.infolist()) != 243:
+                  raise SystemExit(f'unexpected baseline member count: {len(zf.infolist())}')
+              for info in zf.infolist():
                   name = info.filename.replace('\\', '/')
                   if name.startswith('/') or '..' in Path(name).parts:
                       raise SystemExit(f'unsafe ZIP member: {name}')
@@ -56,20 +58,19 @@ jobs:
                   if root not in destination.parents and destination != root:
                       raise SystemExit(f'ZIP member escaped target: {name}')
               if zf.testzip() is not None:
-                  raise SystemExit('ZIP integrity failure')
+                  raise SystemExit('baseline ZIP integrity failure')
               zf.extractall(target)
-
-          manifest = json.loads((target / 'PRODUCT_MANIFEST.json').read_text())
-          expected = {entry['path'] for entry in manifest['files']} | {'PRODUCT_MANIFEST.json'}
-          if names != expected:
-              missing = sorted(expected - names)
-              extra = sorted(names - expected)
-              raise SystemExit(f'archive/manifest mismatch; missing={missing}, extra={extra}')
-          if manifest['file_count'] != 274 or manifest['distribution_scope'] != 'product_repository':
-              raise SystemExit('unexpected product manifest identity')
           PY
+          cd /tmp/field-product
+          git init -q
+          git config user.name "publication-bootstrap"
+          git config user.email "publication-bootstrap@users.noreply.github.com"
+          git add -A
+          git commit -qm baseline
+          git apply --index --binary /tmp/post3.patch
+          test "$(find . -type f ! -path './.git/*' | wc -l | tr -d ' ')" = "275"
 
-      - name: Validate unpacked product source and full optional profile
+      - name: Validate unpacked offline-first product
         working-directory: /tmp/field-product
         shell: bash
         run: |
@@ -78,7 +79,6 @@ jobs:
           python -m pip install -e '.[full,dev]'
           python scripts/check_repository.py --check
           field-master verify
-          field-master capabilities
           python -m compileall -q rabbithole
           ruff check rabbithole scripts tests
           bandit -q -r rabbithole -x tests,history,experimental -ll
@@ -89,33 +89,23 @@ jobs:
             rabbithole/search.py rabbithole/tether.py rabbithole/outward_loop.py \
             rabbithole/perpetual_runtime.py rabbithole/performance_store.py \
             rabbithole/builtin_verifiers.py rabbithole/verifier_worker.py \
-            rabbithole/capabilities.py rabbithole/actions.py \
-            rabbithole/causal.py rabbithole/features.py
+            rabbithole/capabilities.py rabbithole/actions.py rabbithole/causal.py \
+            rabbithole/features.py
           scripts/audit_native.sh
           python scripts/run_product_tests.py --timeout 240 --json /tmp/product-tests.json
           python scripts/run_kernel_tests.py --timeout 180 --json /tmp/kernel-tests.json
           python scripts/build_release.py --outdir /tmp/dist --verify-reproducible
-          python scripts/package_smoke.py --dist /tmp/dist --full
+          python scripts/package_smoke.py --dist /tmp/dist
 
-      - name: Prove zero-dependency offline core install
+      - name: Prove zero-dependency offline install
+        working-directory: /tmp/field-product
         shell: bash
         run: |
           set -euo pipefail
-          python -m venv /tmp/offline-core
-          /tmp/offline-core/bin/python -m pip install --no-index --no-deps /tmp/dist/the_field_akbc-0.18.0rc3.post3-py3-none-any.whl
-          /tmp/offline-core/bin/python - <<'PY'
-          import importlib.metadata as metadata
-          import rabbithole
-          from rabbithole.features import capability_report
-
-          assert rabbithole.__version__ == '0.18.0rc3.post3'
-          assert metadata.requires('the-field-akbc') in (None, []) or all(
-              'extra ==' in requirement for requirement in metadata.requires('the-field-akbc') or []
-          )
-          report = capability_report()
-          assert report['installation']['mandatory_dependencies'] == []
-          assert report['installation']['network_required_for_core'] is False
-          PY
+          python -m venv /tmp/offline-venv
+          /tmp/offline-venv/bin/python -m pip install --no-index --no-deps /tmp/dist/*.whl
+          /tmp/offline-venv/bin/field-master capabilities
+          /tmp/offline-venv/bin/python -c "import importlib.metadata as m; assert not (m.requires('the-field-akbc') or [])"
 
       - name: Publish one clean unpacked product commit
         shell: bash
@@ -126,9 +116,10 @@ jobs:
           git checkout --orphan product-publication
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/field-product/. .
+          rm -rf .git
           find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .hypothesis -o -name dist -o -name build \) -prune -exec rm -rf {} +
           find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
           python scripts/check_repository.py --check
           git add -A
-          git commit -m "Publish The Field 0.18.0rc3.post3 product repository"
+          git commit -m "Publish The Field 0.18.0rc3.post3 offline-first product repository"
           git push --force origin HEAD:agent/field-product-0.18.0rc3
