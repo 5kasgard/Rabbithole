@@ -30,19 +30,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "bf09e3c6f115033a7c749fe1f2dc978e4d1da63f870bf39a583f9f16d95dcf7f"
+          test "$(sha256sum product-upload.zip | cut -d' ' -f1)" = "0964bea2582c948d1a0f980aef8e19580a08e6f1ec78733067cc0537f3328bfe"
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
+          import json
 
           archive = Path('product-upload.zip')
           target = Path('/tmp/field-product')
           target.mkdir(parents=True, exist_ok=True)
           root = target.resolve()
           with ZipFile(archive) as zf:
-              if len(zf.infolist()) != 271:
-                  raise SystemExit(f'unexpected member count: {len(zf.infolist())}')
-              for info in zf.infolist():
+              infos = zf.infolist()
+              if len(infos) != 275:
+                  raise SystemExit(f'unexpected member count: {len(infos)}')
+              names = {info.filename.replace('\\', '/') for info in infos}
+              for info in infos:
                   name = info.filename.replace('\\', '/')
                   if name.startswith('/') or '..' in Path(name).parts:
                       raise SystemExit(f'unsafe ZIP member: {name}')
@@ -55,17 +58,27 @@ jobs:
               if zf.testzip() is not None:
                   raise SystemExit('ZIP integrity failure')
               zf.extractall(target)
+
+          manifest = json.loads((target / 'PRODUCT_MANIFEST.json').read_text())
+          expected = {entry['path'] for entry in manifest['files']} | {'PRODUCT_MANIFEST.json'}
+          if names != expected:
+              missing = sorted(expected - names)
+              extra = sorted(names - expected)
+              raise SystemExit(f'archive/manifest mismatch; missing={missing}, extra={extra}')
+          if manifest['file_count'] != 274 or manifest['distribution_scope'] != 'product_repository':
+              raise SystemExit('unexpected product manifest identity')
           PY
 
-      - name: Validate unpacked product source
+      - name: Validate unpacked product source and full optional profile
         working-directory: /tmp/field-product
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install -e '.[full,dev]'
           python scripts/check_repository.py --check
           field-master verify
+          field-master capabilities
           python -m compileall -q rabbithole
           ruff check rabbithole scripts tests
           bandit -q -r rabbithole -x tests,history,experimental -ll
@@ -76,12 +89,33 @@ jobs:
             rabbithole/search.py rabbithole/tether.py rabbithole/outward_loop.py \
             rabbithole/perpetual_runtime.py rabbithole/performance_store.py \
             rabbithole/builtin_verifiers.py rabbithole/verifier_worker.py \
-            rabbithole/capabilities.py rabbithole/actions.py
+            rabbithole/capabilities.py rabbithole/actions.py \
+            rabbithole/causal.py rabbithole/features.py
           scripts/audit_native.sh
           python scripts/run_product_tests.py --timeout 240 --json /tmp/product-tests.json
           python scripts/run_kernel_tests.py --timeout 180 --json /tmp/kernel-tests.json
           python scripts/build_release.py --outdir /tmp/dist --verify-reproducible
-          python scripts/package_smoke.py --dist /tmp/dist
+          python scripts/package_smoke.py --dist /tmp/dist --full
+
+      - name: Prove zero-dependency offline core install
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/offline-core
+          /tmp/offline-core/bin/python -m pip install --no-index --no-deps /tmp/dist/the_field_akbc-0.18.0rc3.post3-py3-none-any.whl
+          /tmp/offline-core/bin/python - <<'PY'
+          import importlib.metadata as metadata
+          import rabbithole
+          from rabbithole.features import capability_report
+
+          assert rabbithole.__version__ == '0.18.0rc3.post3'
+          assert metadata.requires('the-field-akbc') in (None, []) or all(
+              'extra ==' in requirement for requirement in metadata.requires('the-field-akbc') or []
+          )
+          report = capability_report()
+          assert report['installation']['mandatory_dependencies'] == []
+          assert report['installation']['network_required_for_core'] is False
+          PY
 
       - name: Publish one clean unpacked product commit
         shell: bash
@@ -96,5 +130,5 @@ jobs:
           find . -type f \( -name '*.pyc' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' -o -name '*.zip' \) -delete
           python scripts/check_repository.py --check
           git add -A
-          git commit -m "Publish The Field 0.18.0rc3.post2 product repository"
+          git commit -m "Publish The Field 0.18.0rc3.post3 product repository"
           git push --force origin HEAD:agent/field-product-0.18.0rc3
