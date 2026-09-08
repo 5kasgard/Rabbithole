@@ -1,0 +1,76 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "outdoor-light-fl",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-08",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "grow-light-db",
+      "database_id": "REPLACE_WITH_EXISTING_D1_DATABASE_ID"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SCHEDULER",
+        "class_name": "OutdoorLightScheduler"
+      }
+    ]
+  },
+  "exports": {
+    "OutdoorLightScheduler": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "TIMEZONE": "Australia/Brisbane",
+    "GROW_LAT": "-27.615000",
+    "GROW_LNG": "152.970278",
+    "GROW_ELEVATION_M": "60",
+    "FACE_DOOR_DEG": "60",
+    "FACE_SE_DEG": "150",
+    "FACE_REAR_DEG": "240",
+    "FACE_NW_DEG": "330",
+    "DEFAULT_PHOTOPERIOD_HOURS": "18",
+    "DEFAULT_ANCHOR": "civil_twilight_end",
+    "PLAN_DAYS": "35",
+    "REFRESH_WHEN_DAYS_LEFT": "7",
+    "REASSERT_AFTER_MINUTES": "2",
+    "WEATHER_REFRESH_MINUTES": "60",
+    "WEATHER_FAILURE_RETRY_MINUTES": "10",
+    "OBS_REFRESH_MINUTES": "10",
+    "WARNING_REFRESH_MINUTES": "10",
+    "SATELLITE_REFRESH_MINUTES": "30",
+    "ENABLE_BOM_SECONDARY": "true",
+    "BOM_SECONDARY_REFRESH_MINUTES": "360",
+    "ENABLE_AIR_QUALITY": "true",
+    "AIR_QUALITY_REFRESH_MINUTES": "60",
+    "BOM_OBSERVATION_URL": "https://www.bom.gov.au/fwo/IDQ60801/IDQ60801.94575.json",
+    "BOM_WARNING_RSS_URL": "https://www.bom.gov.au/fwo/IDZ00063.warnings_land_qld.xml",
+    "WARNING_KEYWORDS": "Brisbane,Brisbane City,Ipswich,Logan,Southeast Coast,Southeast Queensland,Moreton Bay",
+    "GENERAL_MIN_GHI_WM2": "200",
+    "GENERAL_MAX_TEMP_C": "34",
+    "GENERAL_MAX_APPARENT_C": "38",
+    "GENERAL_MAX_RAIN_PROB_PCT": "45",
+    "GENERAL_MAX_PRECIP_MM_H": "0.3",
+    "GENERAL_MAX_GUST_KMH": "45",
+    "UNATTENDED_MAX_TEMP_C": "32",
+    "UNATTENDED_MAX_APPARENT_C": "36",
+    "UNATTENDED_MAX_RAIN_PROB_PCT": "25",
+    "UNATTENDED_MAX_PRECIP_MM_H": "0.1",
+    "UNATTENDED_MAX_GUST_KMH": "35",
+    "UNATTENDED_MIN_SOLAR_MJ_M2": "4.0",
+    "MOVE_BUFFER_MINUTES": "15",
+    "RAW_OBSERVATION_RETENTION_DAYS": "365",
+    "RAW_SATELLITE_RETENTION_DAYS": "365",
+    "WEATHER_SNAPSHOT_RETENTION_DAYS": "90",
+    "PLANNER_RETENTION_DAYS": "180",
+    "WARNING_RETENTION_DAYS": "365",
+    "AIR_QUALITY_RETENTION_DAYS": "365"
+  }
+}
